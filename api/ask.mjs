@@ -12,6 +12,12 @@ export default async function handler(req, res) {
   const prompt =
     (req.query && req.query.prompt) || "Say hello and name your model.";
 
+  // Browsers get plain streamed text; ?format=ndjson (or non-HTML clients
+  // like curl) get the raw NDJSON event stream.
+  const wantsHtml = (req.headers.accept || "").includes("text/html");
+  const format =
+    (req.query && req.query.format) || (wantsHtml ? "text" : "ndjson");
+
   // Prefer an explicit AI Gateway key; fall back to the deployment's
   // OIDC token, which AI Gateway also accepts as a credential.
   let credential = process.env.AI_GATEWAY_API_KEY;
@@ -30,11 +36,27 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Stream NDJSON events as the fx worker produces them.
   res.status(200);
-  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader(
+    "Content-Type",
+    format === "text"
+      ? "text/plain; charset=utf-8"
+      : "application/x-ndjson; charset=utf-8",
+  );
   res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.flushHeaders?.();
+
+  const writeEvent = (event) => {
+    if (format === "text") {
+      if (event.type === "chunk") res.write(event.text);
+      else if (event.type === "command")
+        res.write(`\n[ran: ${event.command} -> exit ${event.exitCode}]\n`);
+      else if (event.type === "error") res.write(`\n[error: ${event.message}]\n`);
+    } else {
+      res.write(`${JSON.stringify(event)}\n`);
+    }
+  };
 
   const child = spawn(
     process.execPath,
@@ -45,22 +67,32 @@ export default async function handler(req, res) {
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
 
-  // Forward complete NDJSON lines from the worker to the response.
+  // Forward complete NDJSON lines from the worker.
   let pending = "";
+  const handleLine = (line) => {
+    if (!line.trim()) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return;
+    }
+    writeEvent(event);
+  };
   child.stdout.on("data", (chunk) => {
     pending += chunk;
-    const lastNewline = pending.lastIndexOf("\n");
-    if (lastNewline === -1) return;
-    res.write(pending.slice(0, lastNewline + 1));
-    pending = pending.slice(lastNewline + 1);
+    for (;;) {
+      const newline = pending.indexOf("\n");
+      if (newline === -1) return;
+      handleLine(pending.slice(0, newline));
+      pending = pending.slice(newline + 1);
+    }
   });
 
   const finished = new Promise((resolve) => {
     child.on("close", (code) => resolve(code));
     child.on("error", (error) => {
-      res.write(
-        `${JSON.stringify({ type: "error", message: String(error?.message ?? error) })}\n`,
-      );
+      writeEvent({ type: "error", message: String(error?.message ?? error) });
       resolve(-1);
     });
   });
@@ -71,11 +103,12 @@ export default async function handler(req, res) {
   child.stdin.end();
 
   const code = await finished;
-  if (pending) res.write(pending.endsWith("\n") ? pending : `${pending}\n`);
+  if (pending) handleLine(pending);
   if (code !== 0 && code !== null && code !== -1) {
-    res.write(
-      `${JSON.stringify({ type: "error", message: `fx worker exited with code ${code}: ${stderr.slice(0, 500)}` })}\n`,
-    );
+    writeEvent({
+      type: "error",
+      message: `fx worker exited with code ${code}: ${stderr.slice(0, 500)}`,
+    });
   }
   res.end();
 }
