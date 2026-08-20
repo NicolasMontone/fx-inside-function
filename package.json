@@ -1,0 +1,14 @@
+{
+  "name": "fx-in-function",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "@vercel/functions": "^3.9.5",
+    "just-bash": "^3.4.1",
+    "libfx": "^0.0.4"
+  }
+}
