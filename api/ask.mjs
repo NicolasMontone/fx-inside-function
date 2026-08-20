@@ -30,46 +30,52 @@ export default async function handler(req, res) {
     return;
   }
 
-  try {
-    const result = await runWorker({ prompt: String(prompt), credential });
-    res.status(200).json(result);
-  } catch (error) {
-    res.status(500).json({ error: String(error?.message ?? error) });
-  }
-}
+  // Stream NDJSON events as the fx worker produces them.
+  res.status(200);
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.flushHeaders?.();
 
-function runWorker(input) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      ["--experimental-wasm-jspi", workerPath],
-      { stdio: ["pipe", "pipe", "pipe"] },
-    );
+  const child = spawn(
+    process.execPath,
+    ["--experimental-wasm-jspi", workerPath],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
 
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => (stdout += chunk));
-    child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0 && !stdout) {
-        reject(
-          new Error(`fx worker exited with code ${code}: ${stderr.slice(0, 500)}`),
-        );
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout));
-      } catch {
-        reject(
-          new Error(
-            `fx worker returned invalid JSON. stdout: ${stdout.slice(0, 300)} stderr: ${stderr.slice(0, 300)}`,
-          ),
-        );
-      }
-    });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
 
-    child.stdin.write(JSON.stringify(input));
-    child.stdin.end();
+  // Forward complete NDJSON lines from the worker to the response.
+  let pending = "";
+  child.stdout.on("data", (chunk) => {
+    pending += chunk;
+    const lastNewline = pending.lastIndexOf("\n");
+    if (lastNewline === -1) return;
+    res.write(pending.slice(0, lastNewline + 1));
+    pending = pending.slice(lastNewline + 1);
   });
+
+  const finished = new Promise((resolve) => {
+    child.on("close", (code) => resolve(code));
+    child.on("error", (error) => {
+      res.write(
+        `${JSON.stringify({ type: "error", message: String(error?.message ?? error) })}\n`,
+      );
+      resolve(-1);
+    });
+  });
+
+  req.on("close", () => child.kill());
+
+  child.stdin.write(JSON.stringify({ prompt: String(prompt), credential }));
+  child.stdin.end();
+
+  const code = await finished;
+  if (pending) res.write(pending.endsWith("\n") ? pending : `${pending}\n`);
+  if (code !== 0 && code !== null && code !== -1) {
+    res.write(
+      `${JSON.stringify({ type: "error", message: `fx worker exited with code ${code}: ${stderr.slice(0, 500)}` })}\n`,
+    );
+  }
+  res.end();
 }
