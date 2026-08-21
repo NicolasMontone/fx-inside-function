@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/ask.mjs": {
-      "maxDuration": 120,
+      "maxDuration": 300,
       "includeFiles": "node_modules/libfx/**"
     }
   }

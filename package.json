@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@vercel/functions": "^3.9.5",
+    "@xterm/headless": "^6.0.0",
     "just-bash": "^3.4.1",
     "libfx": "^0.0.4"
   }
